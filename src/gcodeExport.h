@@ -151,6 +151,7 @@ private:
     double extrusion_amount; // in mm or mm^3
     std::deque<double> extrusion_amount_at_previous_n_retractions; // in mm or mm^3
     Point3 currentPosition;
+    Point3 startPosition;
     double currentSpeed;
     int zPos;
     bool isRetracted;
@@ -167,9 +168,9 @@ private:
     
     bool is_volumatric;
 
-    
-    CommandSocket* commandSocket; //!< for sending travel data
-    unsigned int layer_nr; //!< for sending travel data
+    // for sending jump data
+    CommandSocket* commandSocket; 
+    unsigned int layer_nr;
     
 public:
     
@@ -194,6 +195,10 @@ public:
     Point3 getPosition();
     
     Point getPositionXY();
+    
+    void resetStartPosition();
+
+    Point getStartPositionXY();
 
     int getPositionZ();
 

@@ -31,16 +31,13 @@ void GCodePlanner::forceNewPathStart()
         paths[paths.size()-1].done = true;
 }
 
-GCodePlanner::GCodePlanner(CommandSocket* commandSocket, SliceDataStorage& storage, unsigned int layer_nr, Point last_position, int currentExtruder, RetractionConfig* retraction_config_travel, FanSpeedLayerTimeSettings& fan_speed_layer_time_settings, double travelSpeed, bool retraction_combing, int64_t comb_boundary_offset, bool travel_avoid_other_parts, int64_t travel_avoid_distance)
-: storage(storage)
-, commandSocket(commandSocket)
-, layer_nr(layer_nr)
-, start_position(last_position)
-, lastPosition(last_position)
-, fan_speed_layer_time_settings(fan_speed_layer_time_settings)
+GCodePlanner::GCodePlanner(CommandSocket* commandSocket, GCodeExport& gcode, SliceDataStorage& storage, int z, RetractionConfig* retraction_config_travel, double travelSpeed, bool retraction_combing, unsigned int layer_nr, int64_t comb_boundary_offset, bool travel_avoid_other_parts, int64_t travel_avoid_distance)
+: gcode(gcode), storage(storage)
+, z(z)
 , travelConfig(retraction_config_travel, "MOVE")
-, currentExtruder(currentExtruder)
 {
+    gcode.setCommandSocketAndLayerNr(commandSocket, layer_nr);
+    lastPosition = gcode.getPositionXY();
     travelConfig.setSpeed(travelSpeed);
     comb = nullptr;
     last_retraction_config = &storage.retraction_config; // start with general config
@@ -48,6 +45,7 @@ GCodePlanner::GCodePlanner(CommandSocket* commandSocket, SliceDataStorage& stora
     setTravelSpeedFactor(1.0);
     extraTime = 0.0;
     totalPrintTime = 0.0;
+    currentExtruder = gcode.getExtruderNr();
     if (retraction_combing)
     {
         was_combing = true; // means it will try to get inside the comb boundary first
@@ -118,7 +116,7 @@ void GCodePlanner::addTravel(Point p)
     if (comb != nullptr && lastPosition != Point(0,0))
     {
         CombPaths combPaths;
-        combed = comb->calc(lastPosition, p, combPaths, was_combing, is_going_to_comb, last_retraction_config->retraction_min_travel_distance);
+        combed = comb->calc(lastPosition, p, combPaths, was_combing, is_going_to_comb);
         if (combed)
         {
             bool retract = combPaths.size() > 1;
@@ -172,11 +170,6 @@ void GCodePlanner::addTravel(Point p)
         }
     }
     
-    if(comb == nullptr) {
-        // no combing? always retract!
-        path = getLatestPathWithConfig(&travelConfig);
-        path->retract = true;
-    }
     addTravel_simple(p, path);
 }
 
@@ -293,7 +286,7 @@ void GCodePlanner::getNaiveTimeEstimates(double& travelTime, double& extrudeTime
 {
     travelTime = 0.0;
     extrudeTime = 0.0;
-    Point p0 = start_position;
+    Point p0 = gcode.getPositionXY();
     for(unsigned int n=0; n<paths.size(); n++)
     {
         GCodePath* path = &paths[n];
@@ -309,46 +302,8 @@ void GCodePlanner::getNaiveTimeEstimates(double& travelTime, double& extrudeTime
     }
 }
 
-void GCodePlanner::processFanSpeedAndMinimalLayerTime(GCodeExport& gcode)
-{ 
-    FanSpeedLayerTimeSettings& fsml = fan_speed_layer_time_settings;
-    double travelTime;
-    double extrudeTime;
-    getNaiveTimeEstimates(travelTime, extrudeTime);
-    forceMinimalLayerTime(fsml.cool_min_layer_time, fsml.cool_min_speed, travelTime, extrudeTime);
-
-    // interpolate fan speed (for cool_fan_full_layer and for cool_min_layer_time_fan_speed_max)
-    double fanSpeed = fsml.cool_fan_speed_min;
-    double totalLayerTime = travelTime + extrudeTime;
-    if (totalLayerTime < fsml.cool_min_layer_time)
-    {
-        fanSpeed = fsml.cool_fan_speed_max;
-    }
-    else if (totalLayerTime < fsml.cool_min_layer_time_fan_speed_max)
-    { 
-        // when forceMinimalLayerTime didn't change the extrusionSpeedFactor, we adjust the fan speed
-        fanSpeed = fsml.cool_fan_speed_max - (fsml.cool_fan_speed_max-fsml.cool_fan_speed_min) * (totalLayerTime - fsml.cool_min_layer_time) / (fsml.cool_min_layer_time_fan_speed_max - fsml.cool_min_layer_time);
-    }
-    if (layer_nr < fsml.cool_fan_full_layer)
-    {
-        //Slow down the fan on the layers below the [cool_fan_full_layer], where layer 0 is speed 0.
-        fanSpeed = fanSpeed * layer_nr / fsml.cool_fan_full_layer;
-    }
-    gcode.writeFanCommand(fanSpeed);
-}
-
-
-void GCodePlanner::writeGCode(GCodeExport& gcode, bool liftHeadIfNeeded, int layerThickness)
+void GCodePlanner::writeGCode(bool liftHeadIfNeeded, int layerThickness)
 {
-    gcode.setCommandSocketAndLayerNr(commandSocket, layer_nr);
-    
-    gcode.writeLayerComment(layer_nr);
-    
-    int z = storage.meshes[0].layers[layer_nr].printZ; 
-    gcode.setZ(z);
-    
-    processFanSpeedAndMinimalLayerTime(gcode);
-    
     GCodePathConfig* last_extrusion_config = nullptr;
     int extruder = gcode.getExtruderNr();
 
@@ -362,7 +317,7 @@ void GCodePlanner::writeGCode(GCodeExport& gcode, bool liftHeadIfNeeded, int lay
             gcode.switchExtruder(extruder);
         }else if (path.retract)
         {
-            writeRetraction(gcode, path_idx);
+            writeRetraction(path_idx);
         }
         if (path.config != &travelConfig && last_extrusion_config != path.config)
         {
@@ -409,7 +364,7 @@ void GCodePlanner::writeGCode(GCodeExport& gcode, bool liftHeadIfNeeded, int lay
             bool coasting = coasting_config.coasting_enable; 
             if (coasting)
             {
-                coasting = writePathWithCoasting(gcode, path_idx, layerThickness
+                coasting = writePathWithCoasting(path_idx, layerThickness
                             , coasting_config.coasting_volume_move, coasting_config.coasting_speed_move, coasting_config.coasting_min_volume_move
                             , coasting_config.coasting_volume_retract, coasting_config.coasting_speed_retract, coasting_config.coasting_min_volume_retract);
             }
@@ -471,18 +426,18 @@ void GCodePlanner::writeGCode(GCodeExport& gcode, bool liftHeadIfNeeded, int lay
         if (last_extrusion_config)
         {
             bool extruder_switch_retract = false;// TODO: check whether we should do a retractoin_extruderSwitch; is the next path with a different extruder?
-            writeRetraction(gcode, extruder_switch_retract, last_extrusion_config->retraction_config);
+            writeRetraction(extruder_switch_retract, last_extrusion_config->retraction_config);
         }
         gcode.setZ(gcode.getPositionZ() + MM2INT(3.0));
         gcode.writeMove(gcode.getPositionXY(), travelConfig.getSpeed(), 0);
-        gcode.writeMove(gcode.getPositionXY() - Point(-MM2INT(20.0), 0), travelConfig.getSpeed(), 0); // TODO: is this safe?! wouldn't the head move into the sides then?!
+        gcode.writeMove(gcode.getPositionXY() - Point(-MM2INT(20.0), 0), travelConfig.getSpeed(), 0);
         gcode.writeDelay(extraTime);
     }
 }
 
-void GCodePlanner::writeRetraction(GCodeExport& gcode, unsigned int path_idx_travel_after)
+void GCodePlanner::writeRetraction(unsigned int path_idx_travel_after)
 {
-    if (makeRetractSwitchRetract(gcode, path_idx_travel_after))
+    if (makeRetractSwitchRetract(path_idx_travel_after))
     {
         gcode.writeRetraction_extruderSwitch();
     }
@@ -497,10 +452,10 @@ void GCodePlanner::writeRetraction(GCodeExport& gcode, unsigned int path_idx_tra
                 break;
             }
         }
-        writeRetraction(gcode, false, extrusion_retraction_config);
+        writeRetraction(false, extrusion_retraction_config);
     }
 }
-void GCodePlanner::writeRetraction(GCodeExport& gcode, bool extruder_switch_retract, RetractionConfig* retraction_config)
+void GCodePlanner::writeRetraction(bool extruder_switch_retract, RetractionConfig* retraction_config)
 {    
     if (extruder_switch_retract)
     {
@@ -521,7 +476,7 @@ void GCodePlanner::writeRetraction(GCodeExport& gcode, bool extruder_switch_retr
 
 
 
-bool GCodePlanner::makeRetractSwitchRetract(GCodeExport& gcode, unsigned int path_idx)
+bool GCodePlanner::makeRetractSwitchRetract(unsigned int path_idx)
 {
     for (unsigned int path_idx2 = path_idx + 1; path_idx2 < paths.size(); path_idx2++)
     {
@@ -537,7 +492,7 @@ bool GCodePlanner::makeRetractSwitchRetract(GCodeExport& gcode, unsigned int pat
     return false;
 }
     
-bool GCodePlanner::writePathWithCoasting(GCodeExport& gcode, unsigned int path_idx, int64_t layerThickness, double coasting_volume_move, double coasting_speed_move, double coasting_min_volume_move, double coasting_volume_retract, double coasting_speed_retract, double coasting_min_volume_retract)
+bool GCodePlanner::writePathWithCoasting(unsigned int path_idx, int64_t layerThickness, double coasting_volume_move, double coasting_speed_move, double coasting_min_volume_move, double coasting_volume_retract, double coasting_speed_retract, double coasting_min_volume_retract)
 {
     GCodePath& path = paths[path_idx];
     if (path_idx + 1 >= paths.size()
@@ -554,15 +509,15 @@ bool GCodePlanner::writePathWithCoasting(GCodeExport& gcode, unsigned int path_i
     if (path_next.retract)
     {
         if (coasting_volume_retract <= 0) { return false; }
-        return writePathWithCoasting(gcode, path, path_next, layerThickness, coasting_volume_retract, coasting_speed_retract, coasting_min_volume_retract, makeRetractSwitchRetract(gcode, path_idx));
+        return writePathWithCoasting(path, path_next, layerThickness, coasting_volume_retract, coasting_speed_retract, coasting_min_volume_retract, makeRetractSwitchRetract(path_idx));
     }
     else
     {
         if (coasting_volume_move <= 0) { return false; }
-        return writePathWithCoasting(gcode, path, path_next, layerThickness, coasting_volume_move, coasting_speed_move, coasting_min_volume_move);
+        return writePathWithCoasting(path, path_next, layerThickness, coasting_volume_move, coasting_speed_move, coasting_min_volume_move);
     }
 }  
-bool GCodePlanner::writePathWithCoasting(GCodeExport& gcode, GCodePath& path, GCodePath& path_next, int64_t layerThickness, double coasting_volume, double coasting_speed, double coasting_min_volume, bool extruder_switch_retract)
+bool GCodePlanner::writePathWithCoasting(GCodePath& path, GCodePath& path_next, int64_t layerThickness, double coasting_volume, double coasting_speed, double coasting_min_volume, bool extruder_switch_retract)
 {
 
     int64_t coasting_min_dist_considered = 100; // hardcoded setting for when to not perform coasting
@@ -650,7 +605,7 @@ bool GCodePlanner::writePathWithCoasting(GCodeExport& gcode, GCodePath& path, GC
     
     if (path_next.retract)
     {
-        writeRetraction(gcode, extruder_switch_retract, path.config->retraction_config);
+        writeRetraction(extruder_switch_retract, path.config->retraction_config);
     }
     
     for (unsigned int point_idx = point_idx_before_start + 1; point_idx < path.points.size(); point_idx++)

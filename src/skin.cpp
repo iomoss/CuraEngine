@@ -153,35 +153,49 @@ void generateInfill(int layerNr, SliceMeshStorage& storage, int extrusionWidth, 
     }
 }
 
-void combineInfillLayers(int layerNr, SliceMeshStorage& storage, int amount)
+void combineInfillLayers(SliceMeshStorage& storage,unsigned int amount)
 {
-    if(layerNr % amount != 0) //In order to sync up all different parts of infill, only compute infill on modulo-0 layers.
+    amount = std::max(amount,1u);
+    if(storage.layers.empty() || storage.layers.size() - 1 < (size_t)storage.getSettingAsCount("top_layers")) //All layers are top layers. No infill is even generated.
     {
         return;
     }
-    SliceLayer* layer = &storage.layers[layerNr];
-
-    for(int n=1; n<amount; n++)
+    /* We need to round down the layer index we start at to the nearest
+    divisible index. Otherwise we get some parts that have infill at divisible
+    layers and some at non-divisible layers. Those layers would then miss each
+    other. */
+    size_t min_layer = storage.getSettingAsCount("bottom_layers") + amount - 1;
+    min_layer -= min_layer % amount; //Round upwards to the nearest layer divisible by infill_sparse_combine.
+    size_t max_layer = storage.layers.size() - 1 - storage.getSettingAsCount("top_layers");
+    max_layer -= max_layer % amount; //Round downwards to the nearest layer divisible by infill_sparse_combine.
+    for(size_t layer_idx = min_layer;layer_idx <= max_layer;layer_idx += amount) //Skip every few layers, but extrude more.
     {
-        if (layerNr < n)
-            break;
-        
-        SliceLayer* layer2 = &storage.layers[layerNr - n];
-        for(SliceLayerPart& part : layer->parts)
+        SliceLayer* layer = &storage.layers[layer_idx];
+
+        for(unsigned int n = 1;n < amount;n++)
         {
-            Polygons result;
-            for(SliceLayerPart& part2 : layer2->parts)
+            if(layer_idx < n)
             {
-                if (part.boundaryBox.hit(part2.boundaryBox))
-                {
-                    Polygons intersection = part.infill_area[n - 1].intersection(part2.infill_area[0]).offset(-200).offset(200);
-                    result.add(intersection);
-                    part.infill_area[n - 1] = part.infill_area[n - 1].difference(intersection);
-                    part2.infill_area[0] = part2.infill_area[0].difference(intersection);
-                }
+                break;
             }
-            
-            part.infill_area.push_back(result);
+
+            SliceLayer* layer2 = &storage.layers[layer_idx - n];
+            for(SliceLayerPart& part : layer->parts)
+            {
+                Polygons result;
+                for(SliceLayerPart& part2 : layer2->parts)
+                {
+                    if(part.boundaryBox.hit(part2.boundaryBox))
+                    {
+                        Polygons intersection = part.infill_area[n - 1].intersection(part2.infill_area[0]).offset(-200).offset(200);
+                        result.add(intersection);
+                        part.infill_area[n - 1] = part.infill_area[n - 1].difference(intersection);
+                        part2.infill_area[0] = part2.infill_area[0].difference(intersection);
+                    }
+                }
+
+                part.infill_area.push_back(result);
+            }
         }
     }
 }

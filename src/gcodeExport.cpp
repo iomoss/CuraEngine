@@ -8,10 +8,7 @@
 namespace cura {
 
 GCodeExport::GCodeExport()
-: output_stream(&std::cout)
-, commandSocket(nullptr)
-, currentPosition(INT32_MIN,INT32_MIN,0)
-, layer_nr(0)
+: output_stream(&std::cout),currentPosition(0,0,0),startPosition(INT32_MIN,INT32_MIN,0),commandSocket(nullptr),layer_nr(0)
 {
     extrusion_amount = 0;
     current_extruder = 0;
@@ -97,6 +94,17 @@ int GCodeExport::getPositionZ()
     return currentPosition.z;
 }
 
+void GCodeExport::resetStartPosition()
+{
+    startPosition.x = INT32_MIN;
+    startPosition.y = INT32_MIN;
+}
+
+Point GCodeExport::getStartPositionXY()
+{
+    return Point(startPosition.x, startPosition.y);
+}
+
 int GCodeExport::getExtruderNr()
 {
     return current_extruder;
@@ -159,7 +167,17 @@ void GCodeExport::updateTotalPrintTime()
 
 void GCodeExport::writeComment(std::string comment)
 {
-    *output_stream << ";" << comment << "\n";
+    *output_stream << ";";
+    for (unsigned int i = 0; i < comment.length(); i++)
+    {
+        if (comment[i] == '\n')
+        {
+            *output_stream << "\\n";
+        }else{
+            *output_stream << comment[i];
+        }
+    }
+    *output_stream << "\n";
 }
 
 void GCodeExport::writeTypeComment(const char* type)
@@ -345,6 +363,7 @@ void GCodeExport::writeMove(int x, int y, int z, double speed, double extrusion_
     }
     
     currentPosition = Point3(x, y, z);
+    startPosition = currentPosition;
     estimateCalculator.plan(TimeEstimateCalculator::Position(INT2MM(currentPosition.x), INT2MM(currentPosition.y), INT2MM(currentPosition.z), extrusion_amount), speed);
 }
 

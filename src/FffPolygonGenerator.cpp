@@ -46,13 +46,20 @@ bool FffPolygonGenerator::sliceModel(MeshGroup* meshgroup, TimeKeeper& timeKeepe
 
     log("Slicing model...\n");
     int initial_layer_thickness = meshgroup->getSettingInMicrons("layer_height_0");
+    initial_layer_thickness = std::max(initial_layer_thickness,1); //Layer thickness of 0 or lower is not allowed. Rather than giving an error, just snap this to the minimum layer height (1 micron).
     int layer_thickness = meshgroup->getSettingInMicrons("layer_height");
+    layer_thickness = std::max(layer_thickness,1); //Layer thickness of 0 or lower is not allowed. Rather than giving an error, just snap this to the minimum layer height (1 micron).
     if (meshgroup->getSettingAsPlatformAdhesion("adhesion_type") == EPlatformAdhesion::RAFT) 
     { 
         initial_layer_thickness = layer_thickness; 
     }
     int initial_slice_z = initial_layer_thickness - layer_thickness / 2;
     int layer_count = (storage.model_max.z - initial_slice_z) / layer_thickness + 1;
+    if(layer_count <= 0) //Model is shallower than layer_height_0, so not even the first layer is sliced. Return an empty model then.
+    {
+        Progress::messageProgressStage(Progress::Stage::INSET,&timeKeeper,commandSocket); //Continue directly with the inset stage, which will also immediately stop.
+        return true; //This is NOT an error state!
+    }
 
     std::vector<Slicer*> slicerList;
     for(unsigned int mesh_idx = 0; mesh_idx < meshgroup->meshes.size(); mesh_idx++)
@@ -184,10 +191,10 @@ void FffPolygonGenerator::slices2polygons(SliceDataStorage& storage, TimeKeeper&
         Progress::messageProgress(Progress::Stage::SKIN, layer_number+1, total_layers, commandSocket);
     }
     
-    for(unsigned int layer_number = total_layers-1; layer_number > 0; layer_number--)
+    unsigned int combined_infill_layers = storage.getSettingInMicrons("infill_sparse_thickness") / std::max(storage.getSettingInMicrons("layer_height"),1); //How many infill layers to combine to obtain the requested sparse thickness.
+    for(SliceMeshStorage& mesh : storage.meshes)
     {
-        for(SliceMeshStorage& mesh : storage.meshes)
-            combineInfillLayers(layer_number, mesh, mesh.getSettingAsCount("infill_sparse_combine"));
+        combineInfillLayers(mesh,combined_infill_layers);
     }
 
     storage.primeTower.computePrimeTowerMax(storage);
